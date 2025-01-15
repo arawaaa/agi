@@ -1,0 +1,29 @@
+homo(T): homogenous element of type T
+ymd is job due date or current day
+speed # per hour
+
+Feats: obj
+    key → Val
+
+Val:
+    Bool
+|   arr[2] = [low, high] : low ≤ high
+
+obj root
+    ymd: arr[3] homo(int) = [year, month, day]
+    jobs: arr[] homo(Job) key(Job.id)
+        Job: obj
+            id: int
+            bags: int
+            ymd: arr[3] homo(int) = [year, month, day]
+            features: Feats het
+    machines: arr[] homo(Machine) key(Machine.id)
+        Machine: obj
+            id: int
+            speed: int
+            features: Feats het
+    downtime: arr[] homo(DowntimeSpec)
+        DowntimeSpec: obj
+            id: int foreign_key(Machine.id)
+            times: arr[2n] homo(int) : n ∈ ℤ ∧ ∀ n, times[2n] ≤ times[2n + 1]
+    available: arr[2n] homo(int) : : n ∈ ℤ ∧ ∀ n, available[2n] ≤ available[2n + 1]
