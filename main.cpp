@@ -10,96 +10,28 @@
 #include <utility>
 #include <memory>
 #include <thread>
+#include <stdexcept>
 
 #include "ortools/base/init_google.h"
 
 #include "sorter.h"
 
+/* Copyright (c) 2016-2019 Vinnie Falco (vinnie dot falco at gmail dot com)
+ * With modifications by Arnav Rawat
+ *
+ * Distributed under the Boost Software License, Version 1.0. (See accompanying
+ * file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+ */
 
-namespace beast = boost::beast;         // from <boost/beast.hpp>
-namespace http = beast::http;           // from <boost/beast/http.hpp>
-namespace net = boost::asio;            // from <boost/asio.hpp>
-using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace net = boost::asio;
+using tcp = boost::asio::ip::tcp;
 
-//------------------------------------------------------------------------------
-
-// Return a reasonable mime type based on the extension of a file.
-beast::string_view
-mime_type(beast::string_view path)
-{
-    using beast::iequals;
-    auto const ext = [&path]
-    {
-        auto const pos = path.rfind(".");
-        if(pos == beast::string_view::npos)
-            return beast::string_view{};
-        return path.substr(pos);
-    }();
-    if(iequals(ext, ".htm"))  return "text/html";
-    if(iequals(ext, ".html")) return "text/html";
-    if(iequals(ext, ".php"))  return "text/html";
-    if(iequals(ext, ".css"))  return "text/css";
-    if(iequals(ext, ".txt"))  return "text/plain";
-    if(iequals(ext, ".js"))   return "application/javascript";
-    if(iequals(ext, ".json")) return "application/json";
-    if(iequals(ext, ".xml"))  return "application/xml";
-    if(iequals(ext, ".swf"))  return "application/x-shockwave-flash";
-    if(iequals(ext, ".flv"))  return "video/x-flv";
-    if(iequals(ext, ".png"))  return "image/png";
-    if(iequals(ext, ".jpe"))  return "image/jpeg";
-    if(iequals(ext, ".jpeg")) return "image/jpeg";
-    if(iequals(ext, ".jpg"))  return "image/jpeg";
-    if(iequals(ext, ".gif"))  return "image/gif";
-    if(iequals(ext, ".bmp"))  return "image/bmp";
-    if(iequals(ext, ".ico"))  return "image/vnd.microsoft.icon";
-    if(iequals(ext, ".tiff")) return "image/tiff";
-    if(iequals(ext, ".tif"))  return "image/tiff";
-    if(iequals(ext, ".svg"))  return "image/svg+xml";
-    if(iequals(ext, ".svgz")) return "image/svg+xml";
-    return "application/text";
-}
-
-// Append an HTTP rel-path to a local filesystem path.
-// The returned path is normalized for the platform.
-std::string
-path_cat(
-    beast::string_view base,
-    beast::string_view path)
-{
-	if (base.empty())
-		return std::string(path);
-    std::string result(base);
-#ifdef BOOST_MSVC
-    char constexpr path_separator = '\\';
-    if(result.back() == path_separator)
-        result.resize(result.size() - 1);
-    result.append(path.data(), path.size());
-    for(auto& c : result)
-        if(c == '/')
-            c = path_separator;
-#else
-    char constexpr path_separator = '/';
-    if(result.back() == path_separator)
-        result.resize(result.size() - 1);
-    result.append(path.data(), path.size());
-#endif
-    return result;
-}
-
-// Return a response for the given request.
-//
-// The concrete type of the response message (which depends on the
-// request), is type-erased in message_generator.
 template <class Body, class Allocator>
 http::message_generator
-handle_request(
-    beast::string_view doc_root,
-    http::request<Body, http::basic_fields<Allocator>>&& req)
-{
-    // Returns a bad request response
-    auto const bad_request =
-    [&req](beast::string_view why)
-    {
+handle_request(http::request<Body, http::basic_fields<Allocator>>&& req) {
+    auto const bad_request = [&req](beast::string_view why) {
         http::response<http::string_body> res{http::status::bad_request, req.version()};
         res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
         res.set(http::field::content_type, "text/html");
@@ -109,110 +41,67 @@ handle_request(
         return res;
     };
 
-    // Returns a not found response
-    auto const not_found =
-    [&req](beast::string_view target)
-    {
-        http::response<http::string_body> res{http::status::not_found, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, "text/html");
-        res.keep_alive(req.keep_alive());
-        res.body() = "The resource '" + std::string(target) + "' was not found.";
-        res.prepare_payload();
-        return res;
-    };
+    if(req.method() != http::verb::post || req.target() != "/schedule")
+        return bad_request("POST /schedule only");
 
-    // Returns a server error response
-    auto const server_error =
-    [&req](beast::string_view what)
-    {
-        http::response<http::string_body> res{http::status::internal_server_error, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, "text/html");
-        res.keep_alive(req.keep_alive());
-        res.body() = "An error occurred: '" + std::string(what) + "'";
-        res.prepare_payload();
-        return res;
-    };
+    http::string_body::value_type body;
 
-    // Make sure we can handle the method
-    if( req.method() != http::verb::get &&
-        req.method() != http::verb::head)
-        return bad_request("Unknown HTTP-method");
+    try {
+        Sorter sort(req.body());
 
-    // Request path must be absolute and not contain "..".
-    if( req.target().empty() ||
-        req.target()[0] != '/' ||
-        req.target().find("..") != beast::string_view::npos)
-        return bad_request("Illegal request-target");
+        auto ret = sort.matchToSchedule();
 
-    // Build the path to the requested file
-    std::string path = path_cat(doc_root, req.target());
-    if(req.target().back() == '/')
-        path.append("index.html");
+        if (ret == std::nullopt) {
+            body = "{}";
+        } else {
+            boost::json::object obj;
+            for (auto& [id, vec] : ret.value()) {
+                std::vector<boost::json::object> transformed;
+                transformed.reserve(vec.size());
 
-    // Attempt to open the file
-    beast::error_code ec;
-    http::file_body::value_type body;
-    body.open(path.c_str(), beast::file_mode::scan, ec);
-
-    // Handle the case where the file doesn't exist
-    if(ec == beast::errc::no_such_file_or_directory)
-        return not_found(req.target());
-
-    // Handle an unknown error
-    if(ec)
-        return server_error(ec.message());
-
-    // Cache the size since we need it after the move
-    auto const size = body.size();
-
-    // Respond to HEAD request
-    if(req.method() == http::verb::head)
-    {
-        http::response<http::empty_body> res{http::status::ok, req.version()};
-        res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-        res.set(http::field::content_type, mime_type(path));
-        res.content_length(size);
-        res.keep_alive(req.keep_alive());
-        return res;
+                std::transform(vec.begin(), vec.end(), std::back_inserter(transformed), [](std::tuple<int, int, int> tup) {
+                    boost::json::object ret;
+                    ret["id"] = std::get<0>(tup);
+                    ret["start"] = std::get<1>(tup);
+                    ret["end"] = std::get<2>(tup);
+                    return ret;
+                });
+                obj[std::to_string(id)] = boost::json::value_from(transformed);
+            }
+            body = boost::json::serialize(obj);
+        }
+    } catch (std::exception e) {
+        return bad_request("Invalid JSON");
     }
 
-    // Respond to GET request
-    http::response<http::file_body> res{
+    auto const size = body.size();
+
+    http::response<http::string_body> res {
         std::piecewise_construct,
         std::make_tuple(std::move(body)),
-        std::make_tuple(http::status::ok, req.version())};
-    res.set(http::field::server, BOOST_BEAST_VERSION_STRING);
-    res.set(http::field::content_type, mime_type(path));
+        std::make_tuple(http::status::ok, req.version())
+    };
+    res.set(http::field::server, "lol");
+    res.set(http::field::content_type, "application/json");
     res.content_length(size);
-    res.keep_alive(req.keep_alive());
+    res.keep_alive(false);
     return res;
 }
 
-//------------------------------------------------------------------------------
-
-// Report a failure
 void
 fail(beast::error_code ec, char const* what)
 {
     std::cerr << what << ": " << ec.message() << "\n";
 }
 
-// Handles an HTTP server connection
 void
-do_session(
-    tcp::socket& socket,
-    std::shared_ptr<std::string const> const& doc_root)
+do_session(tcp::socket& socket)
 {
     beast::error_code ec;
 
-    // This buffer is required to persist across reads
     beast::flat_buffer buffer;
 
-    for(;;)
-    {
-        // Read a request
+    for(;;) {
         http::request<http::string_body> req;
         http::read(socket, buffer, req, ec);
         if(ec == http::error::end_of_stream)
@@ -220,281 +109,53 @@ do_session(
         if(ec)
             return fail(ec, "read");
 
-        // Handle request
         http::message_generator msg =
-            handle_request(*doc_root, std::move(req));
+            handle_request(std::move(req));
 
-        // Determine if we should close the connection
         bool keep_alive = msg.keep_alive();
 
-        // Send the response
         beast::write(socket, std::move(msg), ec);
 
         if(ec)
             return fail(ec, "write");
-        if(! keep_alive)
-        {
-            // This means we should close the connection, usually because
-            // the response indicated the "Connection: close" semantic.
+        if(!keep_alive)
             break;
-        }
     }
 
-    // Send a TCP shutdown
     socket.shutdown(tcp::socket::shutdown_send, ec);
 
-    // At this point the connection is closed gracefully
 }
-
-//------------------------------------------------------------------------------
 
 int main(int argc, char* argv[])
 {
-    try
-    {
-        // Check command line arguments.
-        if (argc != 4)
-        {
+    InitGoogle(argv[0], &argc, &argv, true);
+
+    try {
+        if (argc != 3) {
             std::cerr <<
-                "Usage: http-server-sync <address> <port> <doc_root>\n" <<
+                "Usage: sched_converter <address> <port>\n" <<
                 "Example:\n" <<
-                "    http-server-sync 0.0.0.0 8080 .\n";
+                "\tsched_converter 0.0.0.0 8080 .\n";
             return EXIT_FAILURE;
         }
         auto const address = net::ip::make_address(argv[1]);
         auto const port = static_cast<unsigned short>(std::atoi(argv[2]));
-        auto const doc_root = std::make_shared<std::string>(argv[3]);
 
-        // The io_context is required for all I/O
         net::io_context ioc{1};
 
-        // The acceptor receives incoming connections
         tcp::acceptor acceptor{ioc, {address, port}};
-        for(;;)
-        {
-            // This will receive the new connection
+        for(;;) {
             tcp::socket socket{ioc};
 
-            // Block until we get a connection
             acceptor.accept(socket);
 
-            // Launch the session, transferring ownership of the socket
-            std::thread{std::bind(
+            std::thread { std::bind(
                 &do_session,
-                std::move(socket),
-                doc_root)}.detach();
+                std::move(socket)
+            )}.detach();
         }
-    }
-    catch (const std::exception& e)
-    {
+    } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return EXIT_FAILURE;
     }
 }
-/*
-int main(int argc, char **argv) {
-    InitGoogle(argv[0], &argc, &argv, true);
-
-    Sorter sort(" \
-    { \
-        \"machines\": [{ \
-            \"id\": 0,\
-            \"features\": {\
-                \"holes\": true,\
-                \"tag\": true\
-            },\
-            \"speed\":1000\
-        },\
-        {\
-            \"id\": 1,\
-            \"features\": {\
-                \"holes\": true,\
-                \"tag\": false\
-            },\
-            \"speed\":1000\
-        },\
-        {\
-            \"id\": 2,\
-            \"features\": {\
-                \"holes\": true,\
-                \"tag\": false\
-            },\
-            \"speed\":1000\
-        },\
-        {\
-            \"id\": 3,\
-            \"features\": {\
-                \"holes\": true,\
-                \"tag\": false\
-            },\
-            \"speed\":1000\
-        }],\
-        \"jobs\": [{\
-            \"id\": 0,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 2000,\
-            \"features\": {\
-                \"holes\": true,\
-                \"tag\": true\
-            }\
-        },\
-        {\
-            \"id\": 1,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1500,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 2,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1500,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 3,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1500,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 4,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 5,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 6,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 7,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 100,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 8,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 9,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 10,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 11,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 12,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 13,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 2000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 14,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 15,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 2457,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 4,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 100,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 16,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1000,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 17,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1500,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        },\
-        {\
-            \"id\": 18,\
-            \"ymd\": [2024, 1, 5],\
-            \"bags\": 1500,\
-            \"features\": {\
-                \"holes\": true\
-            }\
-        }],\
-        \"ymd\": [2024, 1, 2]\
-    } \
-    ");
-
-    sort.matchToSchedule();
-    return 0;
-}
-*/

@@ -28,7 +28,7 @@ struct TaskInfo {
     operations_research::sat::IntVar machine_num;
 };
 
-using schedule = std::vector<std::pair<int, std::list<Job*>>>;
+using schedule = std::map<int, std::vector<std::tuple<int, int, int>>>; // mach_num -> (job_id, start, stop)
 
 
 class Sorter
@@ -36,10 +36,20 @@ class Sorter
     std::vector<std::shared_ptr<Job>> jobs;
     std::vector<std::shared_ptr<Machine>> machines;
 
+    std::vector<int64_t> workerAvailability;
+    std::map<int64_t, std::vector<std::pair<int, int>>> downtimes;
     std::chrono::year_month_day start_day;
 
     operations_research::Domain getWorkerAvailability();
 
+    /*
+     * Shifts scheduled jobs to be as early as possible and adjacent, given maintenance constraints
+     */
+    void arrange(schedule& vecs);
+
+    /*
+     * OR-Tools problem setup and solve to get the schedule
+     */
     void enforceOverlapConstraints(operations_research::sat::CpModelBuilder& model, TaskInfo& t1, TaskInfo& t2);
 public:
     /**
